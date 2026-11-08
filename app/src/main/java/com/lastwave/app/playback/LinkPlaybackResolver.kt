@@ -2,6 +2,7 @@ package com.lastwave.app.playback
 
 import android.content.Intent
 import android.net.Uri
+import android.text.Html
 import android.util.Log
 import com.lastwave.app.data.music.InnerTubeMusicApi
 import com.lastwave.app.data.music.YouTubeMusicTrack
@@ -65,6 +66,9 @@ class LinkPlaybackResolver @Inject constructor(
                 // 1. YouTube & YouTube Music URLs
                 isYouTubeUrl(clean) -> resolveYouTube(clean)
 
+                // 1b. Instagram audio links
+                isInstagramAudioUrl(clean) -> resolveInstagramAudio(clean)
+
                 // 2. Spotify URLs
                 isSpotifyUrl(clean) -> resolveSpotify(clean)
 
@@ -90,6 +94,11 @@ class LinkPlaybackResolver @Inject constructor(
     private fun isSpotifyUrl(url: String): Boolean {
         val lower = url.lowercase()
         return lower.contains("spotify.com") || lower.contains("spotify.link")
+    }
+
+    private fun isInstagramAudioUrl(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains("instagram.com") && lower.contains("/audio/")
     }
 
     private suspend fun resolveYouTube(url: String) {
@@ -149,6 +158,44 @@ class LinkPlaybackResolver @Inject constructor(
             return clean.substringAfter("/shorts/").substringBefore('?').substringBefore('&')
         }
         return null
+    }
+
+    private suspend fun resolveInstagramAudio(url: String) {
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .build()
+        val html = runCatching {
+            http.newCall(request).execute().use { it.body?.string().orEmpty() }
+        }.getOrDefault("")
+
+        val flags = setOf(RegexOption.IGNORE_CASE)
+        val ogTitle = Regex("<meta[^>]+property=[\"']og:title[\"'][^>]+content=[\"']([^\"']+)[\"']", flags)
+            .find(html)?.groupValues?.get(1)
+            ?: Regex("<meta[^>]+content=[\"']([^\"']+)[\"'][^>]+property=[\"']og:title[\"']", flags)
+                .find(html)?.groupValues?.get(1)
+        if (ogTitle.isNullOrBlank()) {
+            Log.w(TAG, "Instagram audio: no title found")
+            return
+        }
+
+        val decoded = Html.fromHtml(ogTitle, Html.FROM_HTML_MODE_LEGACY).toString()
+        if (decoded.contains("original audio", ignoreCase = true)) {
+            Log.w(TAG, "Instagram audio is an original sound, skipping")
+            return
+        }
+
+        // Titles look like "Song · Artist" (order varies), so search with both parts.
+        val query = decoded.split("·", " - ", "•").map { it.trim() }
+            .filter { it.isNotBlank() && !it.equals("Instagram", ignoreCase = true) }
+            .joinToString(" ")
+        if (query.isBlank()) return
+
+        val first = innerTube.searchSongs(query, limit = 1).firstOrNull() ?: return
+        withContext(Dispatchers.Main) {
+            musicPlayer.play(first.toPlayable(), sourceLabel = "Instagram Audio", startRadio = false)
+        }
     }
 
     private suspend fun resolveSpotify(url: String) {
